@@ -13,3 +13,4 @@ New ADR: copy [`template.md`](template.md) to `NNNN-short-title.md` with the nex
 | [0005](0005-wsl-to-vm-forwarding.md) | WSL to VM via IPv4 forwarding on vEthernet adapters | Accepted (automation open) |
 | [0006](0006-dev-workspace-and-public-repo.md) | Dev workspace in WSL; public GitHub repo as source of truth | Accepted |
 | [0007](0007-python-toolchain-and-commit-checks.md) | Python toolchain (uv, 3.13) and commit-time checks | Accepted |
+| [0008](0008-service-account-and-filesystem-layout.md) | Service account `regassist` and `/srv/regassist` layout | Accepted |
