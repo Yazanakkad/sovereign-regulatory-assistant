@@ -24,6 +24,15 @@ log = logging.getLogger("regassist.server")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 
+# Python logging level -> syslog priority (0 emerg ... 7 debug), stored by journald as PRIORITY.
+SYSLOG_PRIORITY = {
+    logging.CRITICAL: 2,
+    logging.ERROR: 3,
+    logging.WARNING: 4,
+    logging.INFO: 6,
+    logging.DEBUG: 7,
+}
+
 
 @dataclass(frozen=True)
 class Config:
@@ -47,7 +56,15 @@ def load_config(env: Mapping[str, str]) -> Config:
 
 
 class JsonFormatter(logging.Formatter):
-    """One JSON object per line; extra fields come from `extra={"fields": {...}}`."""
+    """One JSON object per line; extra fields come from `extra={"fields": {...}}`.
+
+    With syslog_prefix=True each line starts with "<N>" (the syslog priority).
+    journald strips the prefix and stores N as the entry's PRIORITY field.
+    """
+
+    def __init__(self, *, syslog_prefix: bool = False) -> None:
+        super().__init__()
+        self._syslog_prefix = syslog_prefix
 
     def format(self, record: logging.LogRecord) -> str:
         entry: dict[str, object] = {
@@ -61,7 +78,10 @@ class JsonFormatter(logging.Formatter):
             entry.update(fields)
         if record.exc_info:
             entry["exc"] = self.formatException(record.exc_info)
-        return json.dumps(entry, ensure_ascii=False)
+        line = json.dumps(entry, ensure_ascii=False)
+        if self._syslog_prefix:
+            return f"<{SYSLOG_PRIORITY.get(record.levelno, 6)}>{line}"
+        return line
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -136,15 +156,20 @@ def serve(server: ThreadingHTTPServer, config: Config) -> None:
     log.info("stopped", extra={"fields": {"signal": received[0] if received else None}})
 
 
-def configure_logging() -> None:
+def journal_stream_attached(env: Mapping[str, str]) -> bool:
+    """True when systemd connected stdout to journald (it sets JOURNAL_STREAM)."""
+    return "JOURNAL_STREAM" in env
+
+
+def configure_logging(env: Mapping[str, str]) -> None:
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(JsonFormatter())
+    handler.setFormatter(JsonFormatter(syslog_prefix=journal_stream_attached(env)))
     logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
 
 
 def main() -> int:
     """Exit codes: 0 clean stop, 1 cannot bind, 2 invalid configuration."""
-    configure_logging()
+    configure_logging(os.environ)
     try:
         config = load_config(os.environ)
     except ValueError as exc:

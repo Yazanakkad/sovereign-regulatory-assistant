@@ -9,7 +9,13 @@ from collections.abc import Iterator
 
 import pytest
 
-from regassist.server import Config, JsonFormatter, load_config, make_server
+from regassist.server import (
+    Config,
+    JsonFormatter,
+    journal_stream_attached,
+    load_config,
+    make_server,
+)
 
 ARABIC = "\u0645\u0631\u062d\u0628\u0627"  # "marhaba"
 
@@ -65,3 +71,16 @@ def test_unknown_path_returns_404(base_url: str) -> None:
         urllib.request.urlopen(f"{base_url}/nope", timeout=5)  # noqa: S310
     assert excinfo.value.code == 404
     excinfo.value.close()
+
+
+def test_json_formatter_syslog_prefix_maps_level() -> None:
+    record = logging.makeLogRecord(
+        {"name": "regassist", "levelno": logging.ERROR, "levelname": "ERROR", "msg": "boom"}
+    )
+    assert JsonFormatter(syslog_prefix=True).format(record).startswith("<3>{")
+    assert JsonFormatter().format(record).startswith("{")
+
+
+@pytest.mark.parametrize(("env", "expected"), [({"JOURNAL_STREAM": "8:1234"}, True), ({}, False)])
+def test_journal_stream_detection(env: dict[str, str], expected: bool) -> None:
+    assert journal_stream_attached(env) is expected

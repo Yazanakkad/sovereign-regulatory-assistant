@@ -2,7 +2,8 @@
 Description=Sovereign Regulatory Assistant - placeholder API
 Documentation=https://github.com/Yazanakkad/sovereign-regulatory-assistant
 After=network.target
-
+StartLimitIntervalSec=60
+StartLimitBurst=5
 [Service]
 Type=exec
 User=regassist
@@ -13,7 +14,10 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=/etc/regassist/regassist.env
 ExecStart=/usr/bin/python3 -m regassist.server
-
+SyslogIdentifier=regassist-app
+Restart=on-failure
+RestartSec=2
+RestartPreventExitStatus=2
 # --- Hardening (Step 13d) ---
 # Filesystem: everything read-only except the data directory; private /tmp and /dev.
 ProtectSystem=strict
