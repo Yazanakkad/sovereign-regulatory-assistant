@@ -14,5 +14,42 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=/etc/regassist/regassist.env
 ExecStart=/usr/bin/python3 -m regassist.server
 
+# --- Hardening (Step 13d) ---
+# Filesystem: everything read-only except the data directory; private /tmp and /dev.
+ProtectSystem=strict
+ReadWritePaths=/srv/regassist/data
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+UMask=0077
+# Privileges: no capabilities, and no way to gain any.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+# Kernel and system state the app has no reason to touch.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+# Process features.
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+# System calls: only what an ordinary service needs.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+# Network: IP and local sockets only; traffic to and from localhost only.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+
 [Install]
 WantedBy=multi-user.target
