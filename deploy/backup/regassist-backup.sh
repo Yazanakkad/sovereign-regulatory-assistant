@@ -1,7 +1,8 @@
 #!/bin/bash
 # regassist-backup: archive the service's state (data + config), verify it, keep the newest N.
 # Installed as a root-owned copy at /usr/local/sbin/regassist-backup (see ADR-0011).
-# Exit codes: 0 ok · 2 bad configuration · 3 another run holds the lock · other non-zero = failed.
+# Exit codes (contract): 0 ok · 1 backup failed · 2 bad configuration · 3 another run holds the lock.
+# An unexpected failure (e.g. tar's own exit 2) is reported as 1; its original code is logged.
 set -euo pipefail
 umask 077
 
@@ -14,6 +15,9 @@ readonly SUFFIX=".tar.gz"
 
 tmp_archive=""
 tmp_sum=""
+exit_code=""      # set only by fail(): a deliberate exit with a contract code
+failed_line=""    # set by the ERR trap: where an unexpected failure happened
+failed_command=""
 
 log() {
     # log <syslog priority 0-7> <logfmt message>; journald reads the <N> prefix.
@@ -26,46 +30,47 @@ log() {
     fi
 }
 
+fail() {
+    # fail <contract exit code> <logfmt message>
+    exit_code=$1
+    shift
+    log 3 "$*"
+    exit "$exit_code"
+}
+
 finish() {
     local rc=$?
     if [[ -n $tmp_archive && -e $tmp_archive ]]; then rm -f -- "$tmp_archive"; fi
     if [[ -n $tmp_sum && -e $tmp_sum ]]; then rm -f -- "$tmp_sum"; fi
-    if ((rc != 0)); then log 3 "event=backup_failed exit=${rc}"; fi
+    if ((rc == 0)); then return; fi
+    if [[ -n $exit_code ]]; then
+        log 3 "event=backup_failed exit=${rc}"
+        return
+    fi
+    log 3 "event=backup_failed exit=1 cause_exit=${rc} line=${failed_line} command=\"${failed_command//\"/\\\"}\""
+    exit 1
 }
+trap 'failed_line=$LINENO; failed_command=$BASH_COMMAND' ERR
 trap finish EXIT
 
-config_error() {
-    log 3 "event=config_error reason=\"$1\""
-    exit 2
-}
-
 # --- configuration ---------------------------------------------------------
-[[ $KEEP =~ ^[1-9][0-9]*$ ]] || config_error "REGASSIST_BACKUP_KEEP must be a positive integer, got '${KEEP}'"
-[[ -d $BACKUP_DIR ]] || config_error "backup directory ${BACKUP_DIR} does not exist"
-[[ -d $SOURCE_ROOT ]] || config_error "source root ${SOURCE_ROOT} does not exist"
+[[ $KEEP =~ ^[1-9][0-9]*$ ]] || fail 2 "event=config_error reason=\"REGASSIST_BACKUP_KEEP must be a positive integer, got '${KEEP}'\""
+[[ -d $BACKUP_DIR ]] || fail 2 "event=config_error reason=\"backup directory ${BACKUP_DIR} does not exist\""
+[[ -d $SOURCE_ROOT ]] || fail 2 "event=config_error reason=\"source root ${SOURCE_ROOT} does not exist\""
 
 for src in "${SOURCES[@]}"; do
-    if [[ ! -e ${SOURCE_ROOT%/}/${src} ]]; then
-        log 3 "event=source_missing path=${SOURCE_ROOT%/}/${src}"
-        exit 1
-    fi
+    [[ -e ${SOURCE_ROOT%/}/${src} ]] || fail 1 "event=source_missing path=${SOURCE_ROOT%/}/${src}"
 done
 
 # --- one run at a time -----------------------------------------------------
 exec 9>"${BACKUP_DIR}/.lock"
-if ! flock --nonblock 9; then
-    log 4 "event=backup_skipped reason=\"another run holds the lock\""
-    exit 3
-fi
+flock --nonblock 9 || fail 3 "event=backup_skipped reason=\"another run holds the lock\""
 
 # --- create, verify, publish -------------------------------------------------
 started=$SECONDS
 name="${PREFIX}$(date -u +%Y%m%dT%H%M%SZ)${SUFFIX}"
 final="${BACKUP_DIR}/${name}"
-if [[ -e $final ]]; then
-    log 3 "event=archive_exists archive=${name}"
-    exit 1
-fi
+[[ ! -e $final ]] || fail 1 "event=archive_exists archive=${name}"
 
 log 6 "event=backup_started archive=${name} sources=$(IFS=,; printf '%s' "${SOURCES[*]}")"
 tmp_archive=$(mktemp "${BACKUP_DIR}/.incoming.XXXXXX")
