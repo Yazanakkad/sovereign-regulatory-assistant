@@ -1,0 +1,18 @@
+[Unit]
+Description=Sovereign Regulatory Assistant - placeholder API
+Documentation=https://github.com/Yazanakkad/sovereign-regulatory-assistant
+After=network.target
+
+[Service]
+Type=exec
+User=regassist
+Group=regassist
+WorkingDirectory=/srv/regassist/app
+Environment=PYTHONPATH=/srv/regassist/app/src
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/etc/regassist/regassist.env
+ExecStart=/usr/bin/python3 -m regassist.server
+
+[Install]
+WantedBy=multi-user.target
