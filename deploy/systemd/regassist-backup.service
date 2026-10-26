@@ -1,0 +1,47 @@
+[Unit]
+Description=regassist backup: data and config, verified, with retention
+Documentation=https://github.com/Yazanakkad/sovereign-regulatory-assistant/tree/main/deploy/backup
+RequiresMountsFor=/srv/regassist /var/backups/regassist
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/regassist-backup
+SyslogIdentifier=regassist-backup
+TimeoutStartSec=30min
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+# Root, reduced to one power: read and traverse any file. No write override, no chown.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+
+# Filesystem: everything read-only except the backup directory.
+ProtectSystem=strict
+ReadWritePaths=/var/backups/regassist
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+# No network at all.
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+
+# Kernel and process hardening (same set as regassist-app).
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

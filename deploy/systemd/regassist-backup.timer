@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily regassist backup at 02:30 Riyadh time
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 Asia/Riyadh
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
