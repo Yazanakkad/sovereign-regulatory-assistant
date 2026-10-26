@@ -21,6 +21,8 @@ ReadWritePaths=/srv/regassist/data
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
+# PrivateDevices keeps the host's /dev/shm; give the service its own.
+TemporaryFileSystem=/dev/shm:mode=1777,nosuid,nodev,noexec
 UMask=0077
 # Privileges: no capabilities, and no way to gain any.
 NoNewPrivileges=yes
