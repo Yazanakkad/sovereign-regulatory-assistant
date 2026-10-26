@@ -39,8 +39,11 @@ ProtectHostname=yes
 ProtectProc=invisible
 RestrictNamespaces=yes
 RestrictRealtime=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
+# RestrictSUIDSGID= is deliberately not set. Its seccomp filter cannot inspect openat2()'s mode,
+# so it answers openat2() with ENOSYS; the tar shipped with Ubuntu 26.04 opens directories with
+# openat2() and fails ("Cannot stat: Function not implemented") instead of falling back.
+# Setuid creation stays contained by ProtectSystem=strict, the root-only 0700 backup directory
+# and NoNewPrivileges=yes. Re-test after tar or systemd upgrades (ADR-0011).LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
