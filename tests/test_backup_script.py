@@ -126,3 +126,19 @@ def test_concurrent_run_is_refused(source_root: Path, backup_dir: Path) -> None:
     assert result.returncode == 3
     assert "event=backup_skipped" in result.stderr
     assert archives(backup_dir) == set()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a mode-000 file")
+def test_tool_failure_is_reported_as_exit_1(source_root: Path, backup_dir: Path) -> None:
+    unreadable = source_root / "srv/regassist/data/demo/file with space.txt"
+    unreadable.chmod(0o000)
+    try:
+        result = run_backup(source_root, backup_dir)
+    finally:
+        unreadable.chmod(0o600)  # let pytest delete tmp_path
+
+    assert result.returncode == 1
+    assert "event=backup_failed exit=1 cause_exit=2" in result.stderr
+    assert "command=" in result.stderr
+    assert archives(backup_dir) == set()
+    assert not list(backup_dir.glob(".incoming.*"))
