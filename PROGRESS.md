@@ -544,6 +544,6 @@ Outside Project 1 (see the AI Solutions Architect Path doc): case interview prep
 - Probe units use `systemd-run --collect` from now on
 - `docs/runbooks/` holds operational runbooks (Stage 7 failure runbooks go there too)
 
-**Commit** — daee1ea feat(backup): backup script with lock, verification, checksum and retention · 744ae6b feat(deploy): sandboxed backup service and daily timer · 6939949 fix(deploy): drop RestrictSUIDSGID from backup unit; tar needs openat2 · d50416a fix(backup): keep the exit-code contract; report tool failures as 1 with cause · 1bb1649 test(backup): regression test for the exit-code contract · f0ad4c1 docs: backup and restore runbook; ADR-0011 backups · `<hash>` docs(adr): add ADR-0011 to index · (this file) docs(progress): Step 14 backups
+**Commit** — daee1ea feat(backup): backup script with lock, verification, checksum and retention · 744ae6b feat(deploy): sandboxed backup service and daily timer · 6939949 fix(deploy): drop RestrictSUIDSGID from backup unit; tar needs openat2 · d50416a fix(backup): keep the exit-code contract; report tool failures as 1 with cause · 1bb1649 test(backup): regression test for the exit-code contract · f0ad4c1 docs: backup and restore runbook; ADR-0011 backups · cf7db45 docs(adr): add ADR-0011 to index · (this file) docs(progress): Step 14 backups
 
 **Next step** — Confirm the 02:30 scheduled backup ran; then Stage 1 → Step 15: networking lab (TCP vs UDP, ports and sockets, TCP handshake in tcpdump; ss, curl -v, dig, ping, traceroute). Pacing: Steps 15–21 remain in weeks 4–5.
