@@ -8,8 +8,8 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 | --- | --- |
 | Plan | Roadmap v3 (since 2026-10-24): 52 weeks, business and architecture stages added, three exams interleaved |
 | Stage | Stage 1 — Linux and networking (weeks 1–5, 36 h) |
-| Last completed | Step 13 — systemd service + journald (13a–13e; ADR-0009 unit, ADR-0010 time sync) |
-| Next step | Step 14 — Bash backup script + systemd service and timer (see section 4) |
+| Last completed | Step 14 — Bash backup script + systemd service and timer (14a–14e; ADR-0011) |
+| Next step | Confirm the 02:30 Riyadh scheduled backup ran (`systemctl list-timers regassist-backup.timer --no-pager`; `journalctl -u regassist-backup --since "2026-10-26 23:00 UTC" -o cat --no-pager`), then Step 15 — Networking lab (see section 4) |
 | Budget spent | $0 of $20 (OpenAI $0 / 5 · Azure $0 / 10 reserve · contingency $0 / 5) |
 
 ## 2. How we work (rules for every chat)
@@ -34,7 +34,7 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 - Windows 11 Pro (build 26200), i7-1355U 10 cores / 12 threads, 40 GB RAM (~27 GB free after reboot), 308 GB free disk
 - Hyper-V enabled; WSL 2.6.3 — distros: Ubuntu-24.04 (default), docker-desktop
 - Docker Desktop installed (used from Stage 3); no `.wslconfig` yet (memory cap added in Stage 3)
-- VS Code with the WSL extension (Microsoft); VS Code Server installed in WSL
+- VS Code with the WSL extension (Microsoft); VS Code Server installed in WSL; Auto Save on
 - Windows clock syncs from the employer domain (WAK-AD.WAK.local) and drifts when off the corporate network (189 s fast on 2026-10-26, last sync 2026-10-21) → run `w32tm /resync` (Admin PowerShell) when on the corporate network/VPN. Kerberos tolerates 5 min.
 
 **Dev workstation (WSL Ubuntu 24.04.5)**
@@ -43,8 +43,13 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 - uv 0.12.23 in `~/.local/bin`; project Python 3.13.16 (uv-managed); system Python 3.12.3 untouched
 - git 2.43.0; identity Yazan Alaqqad / GitHub noreply email; `init.defaultBranch main`; `pull.ff only`
 - Dev deps (locked in uv.lock): ruff, mypy, pytest 9.1.1, pre-commit 4.6.2
-- pre-commit hooks: pre-commit-hooks v6.0.0, gitleaks v8.30.0, local ruff/mypy via `uv run`
-- Repo contents: `src/regassist/` (`__init__.py`, `server.py` stdlib placeholder service), `tests/` (13 tests), `deploy/systemd/regassist-app.service`, `docs/adr/` (ADR-0001–0010)
+- pre-commit hooks: pre-commit-hooks v6.0.0, gitleaks v8.30.0, shellcheck-py (pinned by autoupdate), local ruff/mypy via `uv run`
+- Repo contents:
+  - `src/regassist/` (`__init__.py`, `server.py` stdlib placeholder service)
+  - `tests/` (22 tests, incl. `test_backup_script.py` run against temporary directories)
+  - `deploy/systemd/` (`regassist-app.service`, `regassist-backup.service`, `regassist-backup.timer`)
+  - `deploy/backup/regassist-backup.sh`
+  - `docs/adr/` (ADR-0001–0011), `docs/runbooks/backup-restore.md`
 - Daily commands: `uv run ruff check .` · `uv run ruff format --check .` · `uv run mypy src tests` · `uv run pytest`
 - Before `git add`: `uv run ruff check --fix .; uv run ruff format .` (hooks that modify files abort the commit); chain commit and push with `&&`
 
@@ -60,8 +65,9 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 - Hyper-V Gen2, 2 vCPU, 4 GB fixed RAM, 40 GB VHDX at `C:\VMs\regassist-srv01\`, automatic checkpoints off
 - Secure Boot on, template MicrosoftUEFICertificateAuthority; ISO detached, boots from disk
 - Hyper-V integration services: Time Synchronization **disabled** (ADR-0010); Guest Service Interface off; KVP "No Contact" (no KVP daemon, harmless)
-- Ubuntu Server 26.04.1 LTS, kernel 7.0.0-38-generic, LVM root 37 GB, swap 3.8 GiB
+- Ubuntu Server 26.04.1 LTS, kernel 7.0.0-38-generic, LVM root 37 GB (7 GB used), swap 3.8 GiB
 - System Python 3.14.4 (`/usr/bin/python3`; dev uses 3.13 — skew removed by Docker in Stage 3); git 2.53.0
+- Tools: tar, gzip, zstd, sha256sum, flock present; strace installed (diagnostics); shellcheck not installed (runs in WSL via pre-commit)
 - Fully patched; unattended security upgrades on (apt-daily* timers)
 - Time (ADR-0010): chrony 4.8 is the only clock writer, Ubuntu NTS servers, drop-in `/etc/chrony/conf.d/10-regassist-makestep.conf` (`makestep 1 -1`); clock and logs in UTC (Riyadh = UTC+3)
 - Journal persistent in /var/log/journal (~21 MB)
@@ -88,6 +94,7 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 - `/srv/regassist` root:root 0755 · `app/` yazan:regassist 2750 (setgid) · `data/` regassist:regassist 0750 · `/etc/regassist` root:regassist 0750
 - yazan login umask is 0002 → anything written into `app/` runs as `(umask 027; …)`; post-deploy check `find /srv/regassist/app -perm -g+w` must print nothing
 - Never run Python as yazan inside `app/` (it would write group-writable `__pycache__`)
+- `data/demo/` holds two small test files (`note.txt`, `file with space.txt`, owned by regassist) used by the backup drills
 
 **Service regassist-app (ADR-0009)**
 
@@ -99,12 +106,30 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 - Deploy: `(umask 027; git -C /srv/regassist/app pull)`; if the unit changed: `sudo install -m 0644 -o root -g root /srv/regassist/app/deploy/systemd/regassist-app.service /etc/systemd/system/; sudo systemctl daemon-reload; sudo systemctl restart regassist-app`
 - Logs: `journalctl -u regassist-app` · `-p err` · `-o cat` · `-b -1` (previous boot) · `--since "15 min ago"`
 
+**Backups (ADR-0011)**
+
+- Script `/usr/local/sbin/regassist-backup` = root-owned 0755 copy of `deploy/backup/regassist-backup.sh`
+  - Sources: `srv/regassist/data`, `etc/regassist` (relative to `/`); code is not backed up (git is the source of truth)
+  - Flow: config checks → `flock` → temp file in the backup dir → read the whole archive back → SHA-256 file → atomic rename → `sync` → retention
+  - Exit codes: 0 ok · 1 failed (tool failures mapped to 1; original code logged as `cause_exit`, with `line` and `command`) · 2 bad configuration · 3 locked
+  - Env overrides: `REGASSIST_BACKUP_DIR`, `REGASSIST_BACKUP_KEEP` (default 7), `REGASSIST_BACKUP_SOURCE_ROOT`
+  - Logs: logfmt (`event=… key=value`) with syslog priority prefix
+- Destination `/var/backups/regassist` root:root 0700; archives `regassist-YYYYMMDDTHHMMSSZ.tar.gz` + `.sha256`, both 0600; `.lock` 0600
+- Retention: newest 7 by count, pruned only after a verified success, never the archive just written (clock-jump safe)
+- Unit `regassist-backup.service`: Type=oneshot, static (started by the timer), root reduced to `CAP_DAC_READ_SEARCH`, `ProtectSystem=strict` + `ReadWritePaths=/var/backups/regassist`, no network (`PrivateNetwork`, `IPAddressDeny=any`, AF_UNIX only), seccomp `@system-service`, `TimeoutStartSec=30min`, Nice 10 / IO best-effort 7; exposure 1.3 OK
+- `RestrictSUIDSGID=` deliberately not set on the backup unit: its seccomp filter answers `openat2()` with ENOSYS and the Ubuntu 26.04 tar uses `openat2()` (compensating controls: ProtectSystem=strict, 0700 root-only destination, NoNewPrivileges)
+- Timer `regassist-backup.timer`: `OnCalendar=*-*-* 02:30:00 Asia/Riyadh` (23:30 UTC), `Persistent=true`, enabled
+- Deploy: `(umask 027; git -C /srv/regassist/app pull); sudo install -m 0755 -o root -g root /srv/regassist/app/deploy/backup/regassist-backup.sh /usr/local/sbin/regassist-backup`; units: `sudo install -m 0644 -o root -g root /srv/regassist/app/deploy/systemd/regassist-backup.{service,timer} /etc/systemd/system/; sudo systemctl daemon-reload`
+- Run now: `sudo systemctl start regassist-backup.service`; health check and restores: `docs/runbooks/backup-restore.md`
+- Measured technical RTO: 0.34 s (full `data/` restore, 2026-10-27); RPO up to 24 h
+- Current archives: 4 (2026-10-26 20:26, 21:00, 21:04 and the post-drill run)
+
 **Firewall (ufw)**
 
 - Active, starts on boot; default deny incoming / allow outgoing / routed disabled
 - 22/tcp LIMIT; logging low → blocked packets: `sudo journalctl -k -g 'UFW BLOCK'`
 
-**Hyper-V checkpoints:** 01-base-install, 02-ssh-hardened, 02-hardened-patched, 03-pre-firewall, 04-firewall, 05-service-account, 06-systemd-service
+**Hyper-V checkpoints:** 01-base-install, 02-ssh-hardened, 02-hardened-patched, 03-pre-firewall, 04-firewall, 05-service-account, 06-systemd-service, 07-backup
 
 **Known quirks**
 
@@ -113,15 +138,21 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 - After a reconnect, check the prompt before pasting: `PS C:\…>` = Windows, `yazan@yazan` = WSL, `yazan@regassist-srv01` = VM
 - WSL → VM forwarding resets after Windows reboot or WSL restart → re-run (Admin PowerShell): `Set-NetIPInterface -InterfaceAlias "vEthernet (WSL (Hyper-V firewall))","vEthernet (Default Switch)" -AddressFamily IPv4 -Forwarding Enabled` (automation pending — ADR-0005)
 - Open VS Code from WSL (`cd ~/code/sovereign-regulatory-assistant; code .`); bottom-left must show WSL: Ubuntu-24.04. "Insert final newline" is enabled in VS Code settings.
+- VS Code: create new files with **New File at the repo root and the full path** (e.g. `deploy/backup/x.sh`); right-clicking a compacted `deploy / systemd` row creates the file inside `systemd/`. Auto Save is on because an unsaved edit once dropped out of a commit.
+- `pre-commit run --all-files` only checks tracked files; a new file shows "(no files to check) Skipped" until it is staged
+- `ruff check --fix` cannot fix E501 (line too long); `ruff format` wraps the lines
 - WSL has no ssh-agent: the GitHub key passphrase is asked on every push/pull (optional fix later)
 - Old kernel 7.0.0-30 is autoremovable (`sudo apt autoremove` when convenient)
 - "1 device has a firmware upgrade" (fwupd) → Hyper-V virtual firmware; ignore
 - Log out of the Hyper-V console after any use (a forgotten tty1 login was found and closed on 2026-10-11)
 - Largest memory users on the VM: fwupd (~48 MB) and snapd (~45 MB); trimming deferred until RAM gets tight
 - After a laptop sleep the VM clock is stepped by chrony within about one poll; journal entries around a step can look out of order
-- "active" ≠ ready: about 90 ms between systemd "Started" and the socket being bound (curl right after a restart can fail; fix in Stage 2)
+- "active" ≠ ready: about 90 ms between systemd "Started" and the socket being bound (curl right after a restart can fail; seen again in the restore drill; fix in Stage 2)
 - `systemd-analyze verify` prints CPUAccounting warnings for Ubuntu's xfs_scrub units; not ours
 - `ps` cuts usernames longer than 8 characters (`regassi+`); use `ps -o user:12,…`
+- `systemctl --failed` is the only failure signal until Stage 5 → keep it clean: use `systemd-run --collect` (`-G`) for probes; clear leftovers with `sudo systemctl reset-failed 'run-*.service'`
+- tar on Ubuntu 26.04 opens directories with `openat2()`; under `RestrictSUIDSGID=yes` it fails with "Cannot stat: Function not implemented" (ENOSYS). Re-test after tar or systemd upgrades.
+- Drills and temporary overrides go in `/run/systemd/system/<unit>.d/` (gone on reboot), never in `/etc`
 
 ## 4. Stage 1 step plan (weeks 1–5)
 
@@ -148,6 +179,11 @@ For a new chat: read this whole file first. Continue from **Current position**. 
     - 13d. Sandbox: 9.2 UNSAFE → 1.1 OK; probe found /dev/shm still shared → private tmpfs
     - 13e. Restart policy, syslog identifier/priorities, crash / bad-config / egress / reboot drills; clock fix (ADR-0010); ADR-0009
 14. Bash backup script + systemd service and timer, with retention and a tested restore
+    - 14a. Backup design (scope, destination, identity, schedule, retention); /var/backups/regassist 0700; manual tar backup and scratch restore
+    - 14b. Script (strict mode, flock, atomic publish, read-back verify, SHA-256, count retention), shellcheck hook, pytest tests against temp dirs; root-owned copy in /usr/local/sbin
+    - 14c. Oneshot service (root + CAP_DAC_READ_SEARCH only, read-only FS, no network) + Persistent timer; sandbox bisection found RestrictSUIDSGID vs tar openat2; exit-code contract fix
+    - 14d. Restore drills: single file, full data/ (technical RTO 0.34 s), corrupted archive detected
+    - 14e. Failure drill via /run drop-in; runbook docs/runbooks/backup-restore.md; ADR-0011; checkpoint 07-backup
 15. Networking lab: TCP vs UDP, ports and sockets, TCP handshake in tcpdump; ss, curl -v, dig, ping, traceroute
 16. Nginx reverse proxy + self-signed TLS (SAN = regassist-srv01.mshome.net); ufw allow 443
 17. End-to-end request trace (Browser → DNS → TCP → TLS → HTTP → Nginx → app), written up in docs/
@@ -172,9 +208,16 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 | ADR-0008 | Service account regassist (system, nologin, no sudo) and /srv/regassist layout; code read-only to the service; deploys with umask 027 | Accepted, written |
 | ADR-0009 | systemd unit: root-owned copy, Type=exec, sandbox (exposure 1.1), restart on failure but not on config error, JSON logs with syslog priority; read-only deploy key | Accepted, written |
 | ADR-0010 | Time sync: chrony only writer (Hyper-V time sync off), Ubuntu NTS servers, makestep 1 -1; host PTP clock reserved for Azure | Accepted, written |
+| ADR-0011 | Local backups: verified tar archives from a sandboxed systemd timer; root reduced to read-search, no network; count-based retention after success; RestrictSUIDSGID off for the backup unit (tar openat2) | Accepted, written |
 
 **Open items**
 
+- Confirm the first scheduled backup (02:30 Riyadh, 27 Oct) and the `Persistent=` catch-up after a laptop sleep or shutdown
+- Off-VM backup copy plus encryption at rest: a separate unit with network access and read-only access to the archives (restic or borg as candidates); until then backups share the VHDX and are unencrypted
+- Stage 3: application-consistent dumps (Postgres `pg_dump`, Qdrant snapshot API) before archiving
+- Stage 4a: the personal-data retention ADR must cover backups (deleted data survives up to 7 days in archives)
+- Stage 6: run `systemd-analyze verify` on `deploy/systemd/*` and the backup tests in CI
+- Backup runbook: name an owner when Stage 1b defines roles
 - Repo license not chosen yet (no LICENSE file = all rights reserved)
 - ADR-0005 automation (scheduled task at logon is the candidate)
 - Python version re-evaluated in Stage 3 when embedding and OCR libraries are chosen (ADR-0007)
@@ -193,7 +236,7 @@ Weeks run Monday to Sunday from 5 October 2026.
 
 | Stage | Weeks | Hours | Status |
 | --- | --- | --- | --- |
-| 1 — Linux and networking | 1–5 | 36 | In progress (Steps 1–13 done) |
+| 1 — Linux and networking | 1–5 | 36 | In progress (Steps 1–14 done) |
 | 1b — Business analysis + PSPO I (exam ~13 Dec 2026) | 6–11 | 72 | Not started |
 | 1c — Solution architecture + TOGAF EA (exam ~24 Jan 2027) | 12–16 | 60 | Not started |
 | 2 — API, auth, CI v1 | 17–19 | 30 | Not started |
@@ -449,6 +492,58 @@ Outside Project 1 (see the AI Solutions Architect Path doc): case interview prep
 - ADR-0010: chrony only clock writer, NTS, makestep 1 -1; host PTP clock reserved for Azure (Stage 8)
 - Host Windows clock not reconfigured (employer domain); resync on the corporate network/VPN
 
-**Commit** — d1f04b4 feat(server): placeholder HTTP service · 614a93e feat(deploy): systemd unit · 35635ca feat(deploy): harden the systemd unit · eb66410 fix(deploy): private /dev/shm · 4a99b89 feat(deploy): restart policy, syslog identifier and log priorities · cf7db45 docs(adr): ADR-0009 and ADR-0010 · (this file) docs(progress): Roadmap v3 and Step 13
+**Commit** — d1f04b4 feat(server): placeholder HTTP service · 614a93e feat(deploy): systemd unit · 35635ca feat(deploy): harden the systemd unit · eb66410 fix(deploy): private /dev/shm · 4a99b89 feat(deploy): restart policy, syslog identifier and log priorities · cf7db45 docs(adr): ADR-0009 and ADR-0010 · 9294a70 docs(progress): Roadmap v3 and Step 13
 
 **Next step** — Stage 1 → Step 14: Bash backup script (data/ and /etc/regassist) run by a systemd service and timer, with retention and a tested restore
+
+### 2026-10-26/27 — Step 14 (14a–14e)
+
+**Done**
+
+- 14a: backup design (scope data/ + /etc/regassist, code excluded); /var/backups/regassist root:root 0700; demo data seeded as regassist; manual tar backup, listing by name and by UID, scratch restore matched including owners and modes; root's umask left the manual archive 644
+- 14b: `deploy/backup/regassist-backup.sh` — strict mode, flock, temp file → read-back verify → SHA-256 → atomic rename → sync, count retention after success that never prunes the new archive, logfmt logs with syslog priorities; shellcheck-py pre-commit hook; pytest tests against temporary directories; root-owned copy `/usr/local/sbin/regassist-backup`; archives 0600
+- 14c: `regassist-backup.service` (oneshot, root with only CAP_DAC_READ_SEARCH, ProtectSystem=strict, one writable path, no network, seccomp) + `regassist-backup.timer` (02:30 Asia/Riyadh, Persistent); capability probes with systemd-run; first service run failed "Cannot stat: Function not implemented" → bisected the sandbox (kern group → RestrictSUIDSGID) → strace showed tar uses openat2 → option removed from the backup unit with compensating controls; exit-code contract fixed (tool failures → 1 with cause_exit) plus a regression test
+- 14d: restore drills — single file with --keep-old-files; full data/ restore with the app stopped and restarted, technical RTO 0.34 s, DATA MATCHES; corrupted copy detected by checksum and gzip CRC
+- 14e: failure drill via a /run drop-in (KEEP=0 → failed, exit 2, nothing pruned) and recovery; cleared leftover failed probe units; runbook `docs/runbooks/backup-restore.md`; ADR-0011 and index entry; checkpoint 07-backup
+
+**Key concepts**
+
+- Back up only what can't be recreated; backup vs checkpoint vs replication; 3-2-1 rule; RPO/RTO as business decisions (NFRs in Stage 1b)
+- Backups are the most sensitive copy; personal-data retention must include backups (PDPL)
+- tar stores user names and numeric IDs and restores by name as root; relative members with `--directory /`
+- File copies of live databases are inconsistent → application-consistent dumps
+- Bash strict mode (`-euo pipefail`); atomic publish via same-filesystem rename; read-back verification; checksums as audit evidence; flock released by the kernel when the process dies
+- Count-based retention, only after success, never the newest archive (clock-jump safe)
+- Exit codes as an interface; deliberate vs unexpected failures; ERR trap plus `exit` inside an EXIT trap
+- Root = about 40 capabilities; CAP_DAC_READ_SEARCH vs CAP_DAC_OVERRIDE; capabilities alone don't stop root writing root-owned files → ProtectSystem
+- No network for a local backup job; the off-site copy belongs in a separate unit
+- Type=oneshot semantics (start blocks; default start timeout infinite); OnCalendar with a time zone; Persistent catch-up; static units started by timers
+- ENOSYS from systemd seccomp; RestrictSUIDSGID can't inspect openat2's mode; bisecting a sandbox; strace
+- Unit tests outside the sandbox ≠ integration test inside it
+- Restore order: stop writer → move aside → verify → extract → start → health check → compare → clean up; a running service's sandbox keeps a bind mount of the old directory
+- Technical RTO vs real RTO (detection and decision time excluded)
+- /run vs /etc drop-ins; `systemctl --failed` hygiene (alert fatigue); `systemd-run --collect`
+- Runbook (how, kept current, drilled) vs ADR (why, superseded not edited)
+
+**Validation**
+
+- Manual restore: RESTORE MATCHES; 640 regassist:regassist and 640 root:regassist after round trip
+- pytest 22 passed; shellcheck Passed; ruff and mypy clean
+- First script run: archive, .sha256 and .lock all 0600; `sha256sum -c` OK; KEEP=1 pruned exactly one archive; identical SHA-256 for unchanged data
+- Capability probes: no caps → read denied; read-search only → read OK, write denied; /etc writable without ProtectSystem, read-only with it
+- Bisection: all and kern fail, fs/net/sched pass; only RestrictSUIDSGID=yes fails; strace: `openat2(4, "srv/regassist/", … resolve=0)`
+- Service run: status=0/SUCCESS, TriggeredBy timer, exposure 1.3 OK; calendar next elapse 23:30 UTC
+- Restore drills: single file 640 regassist:regassist with original content; full restore RTO 0.34 s, 750 regassist:regassist, DATA MATCHES, app active (one curl refused before ready — known gap); corrupted copy hash a35d… vs recorded 3d80…, gzip CRC error, tar exit 2
+- Failure drill: status=2, unit listed in --failed, config_error and backup_failed exit=2 logged, archives 3 → 3; after cleanup exit=0, 0 failed units, 4 archives
+- Repo: runbook present; checkpoint list ends with 07-backup
+
+**Decisions**
+
+- ADR-0011: local verified backups via a sandboxed systemd timer; root reduced to read-search, no network; count retention after success; gzip; RestrictSUIDSGID off for the backup unit only
+- Backups stay on the same disk and unencrypted for now; off-VM copy with encryption is an open item
+- Probe units use `systemd-run --collect` from now on
+- `docs/runbooks/` holds operational runbooks (Stage 7 failure runbooks go there too)
+
+**Commit** — daee1ea feat(backup): backup script with lock, verification, checksum and retention · 744ae6b feat(deploy): sandboxed backup service and daily timer · 6939949 fix(deploy): drop RestrictSUIDSGID from backup unit; tar needs openat2 · d50416a fix(backup): keep the exit-code contract; report tool failures as 1 with cause · 1bb1649 test(backup): regression test for the exit-code contract · f0ad4c1 docs: backup and restore runbook; ADR-0011 backups · `<hash>` docs(adr): add ADR-0011 to index · (this file) docs(progress): Step 14 backups
+
+**Next step** — Confirm the 02:30 scheduled backup ran; then Stage 1 → Step 15: networking lab (TCP vs UDP, ports and sockets, TCP handshake in tcpdump; ss, curl -v, dig, ping, traceroute). Pacing: Steps 15–21 remain in weeks 4–5.
