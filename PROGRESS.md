@@ -8,8 +8,8 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 | --- | --- |
 | Plan | Roadmap v3 (since 2026-10-24): 52 weeks, business and architecture stages added, three exams interleaved |
 | Stage | Stage 1 — Linux and networking (weeks 1–5, 36 h) |
-| Last completed | Step 14 — Bash backup script + systemd service and timer (14a–14e; ADR-0011) |
-| Next step | Confirm the 02:30 Riyadh scheduled backup ran (`systemctl list-timers regassist-backup.timer --no-pager`; `journalctl -u regassist-backup --since "2026-10-26 23:00 UTC" -o cat --no-pager`), then Step 15 — Networking lab (see section 4) |
+| Last completed | Step 15 — Networking lab (15a–15e); first scheduled backup confirmed (caught up after laptop sleep) |
+| Next step | Step 16a — install Nginx and inspect it (see section 4). Nothing from Step 16 has been run yet: Nginx is not installed. 16b needs a decision: local CA vs plain self-signed certificate |
 | Budget spent | $0 of $20 (OpenAI $0 / 5 · Azure $0 / 10 reserve · contingency $0 / 5) |
 
 ## 2. How we work (rules for every chat)
@@ -34,6 +34,8 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 - Windows 11 Pro (build 26200), i7-1355U 10 cores / 12 threads, 40 GB RAM (~27 GB free after reboot), 308 GB free disk
 - Hyper-V enabled; WSL 2.6.3 — distros: Ubuntu-24.04 (default), docker-desktop
 - Docker Desktop installed (used from Stage 3); no `.wslconfig` yet (memory cap added in Stage 3)
+- WSL kernel 6.6.87.2-microsoft-standard-WSL2; `tcp_syn_linear_timeouts=4`, `tcp_syn_retries=6` (SYN retries at 1 s ×5, then exponential; ~2 min default connect timeout)
+- Windows Firewall drops ping to the Default Switch host side (172.27.48.1), but the host still routes
 - VS Code with the WSL extension (Microsoft); VS Code Server installed in WSL; Auto Save on
 - Windows clock syncs from the employer domain (WAK-AD.WAK.local) and drifts when off the corporate network (189 s fast on 2026-10-26, last sync 2026-10-21) → run `w32tm /resync` (Admin PowerShell) when on the corporate network/VPN. Kerberos tolerates 5 min.
 
@@ -68,16 +70,22 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 - Ubuntu Server 26.04.1 LTS, kernel 7.0.0-38-generic, LVM root 37 GB (7 GB used), swap 3.8 GiB
 - System Python 3.14.4 (`/usr/bin/python3`; dev uses 3.13 — skew removed by Docker in Stage 3); git 2.53.0
 - Tools: tar, gzip, zstd, sha256sum, flock present; strace installed (diagnostics); shellcheck not installed (runs in WSL via pre-commit)
+- Network tools: ss, ip, tcpdump, dig 9.20, tracepath, nc, curl 8.18 present; traceroute not installed (install only if TCP traceroute is needed)
+- Listening sockets (`sudo ss -tulpn`): 22/tcp on 0.0.0.0 and [::] owned by systemd (socket-activated sshd); 127.0.0.1:8000 python3 (app, accept backlog 5); 127.0.0.53%lo:53 and 127.0.0.54:53 tcp+udp systemd-resolved; udp 127.0.0.1/[::1]:323 chronyd; udp :68 on eth0 systemd-networkd (DHCP)
 - Fully patched; unattended security upgrades on (apt-daily* timers)
 - Time (ADR-0010): chrony 4.8 is the only clock writer, Ubuntu NTS servers, drop-in `/etc/chrony/conf.d/10-regassist-makestep.conf` (`makestep 1 -1`); clock and logs in UTC (Riyadh = UTC+3)
 - Journal persistent in /var/log/journal (~21 MB)
 
 **Network**
 
-- VM eth0: DHCP from Default Switch — currently 172.27.56.52/20 (can change; always use the name)
+- VM eth0: DHCP from Default Switch — currently 172.27.50.46/20 (was 172.27.56.52; changed without notice — always use the name); MTU 1500; IPv6 link-local only (no IPv6 route)
+- Routes: default via 172.27.48.1 (dhcp); connected 172.27.48.0/20; host route to 172.27.48.1
 - Name: regassist-srv01.mshome.net (Default Switch DNS) · host side of switch: 172.27.48.1
-- VM DNS path: app → 127.0.0.53 (systemd-resolved) → 172.27.48.1 (Windows host) → internet
-- WSL → VM works via IPv4 forwarding on vEthernet (WSL (Hyper-V firewall)) + vEthernet (Default Switch); VM sees WSL's own IP (routed, not NATed)
+- VM DNS path: app → 127.0.0.53 (systemd-resolved stub, `search .`) → 172.27.48.1 (Windows Default Switch DNS proxy) → internet
+- The Windows DNS proxy strips EDNS and rewrites TTLs to 0 → resolved never caches (0 hits); it passes NXDOMAIN through correctly
+- WSL → VM works via IPv4 forwarding on vEthernet (WSL (Hyper-V firewall)) + vEthernet (Default Switch); VM sees WSL's own IP 172.21.48.20 (routed, not NATed; TTL 63 = one hop)
+- Home internet: 4G/5G router at 192.168.8.1 → carrier network (private 10.x/172.17.x hops = carrier-grade NAT) → ~45 ms to 1.1.1.1, ~80 ms to example.org; three NAT layers (Default Switch, router, carrier)
+- Path MTU reported by the router: 1280 (cached per destination, `ip route get <ip>`); ICMP echo ≥ 1200 bytes is dropped on this network, TCP unaffected (1.3 MB HTTPS download in 0.9 s)
 
 **Access**
 
@@ -122,7 +130,7 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 - Deploy: `(umask 027; git -C /srv/regassist/app pull); sudo install -m 0755 -o root -g root /srv/regassist/app/deploy/backup/regassist-backup.sh /usr/local/sbin/regassist-backup`; units: `sudo install -m 0644 -o root -g root /srv/regassist/app/deploy/systemd/regassist-backup.{service,timer} /etc/systemd/system/; sudo systemctl daemon-reload`
 - Run now: `sudo systemctl start regassist-backup.service`; health check and restores: `docs/runbooks/backup-restore.md`
 - Measured technical RTO: 0.34 s (full `data/` restore, 2026-10-27); RPO up to 24 h
-- Current archives: 4 (2026-10-26 20:26, 21:00, 21:04 and the post-drill run)
+- Current archives: 5 (2026-10-26 20:26, 21:00, 21:04, the post-drill run, and 2026-10-27 08:02 — the first timer run, caught up after a laptop sleep)
 
 **Firewall (ufw)**
 
@@ -153,6 +161,13 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 - `systemctl --failed` is the only failure signal until Stage 5 → keep it clean: use `systemd-run --collect` (`-G`) for probes; clear leftovers with `sudo systemctl reset-failed 'run-*.service'`
 - tar on Ubuntu 26.04 opens directories with `openat2()`; under `RestrictSUIDSGID=yes` it fails with "Cannot stat: Function not implemented" (ENOSYS). Re-test after tar or systemd upgrades.
 - Drills and temporary overrides go in `/run/systemd/system/<unit>.d/` (gone on reboot), never in `/etc`
+- Laptop sleep freezes the VM clock; chrony's "System clock wrong by N seconds" line carries the stale pre-step timestamp, the "stepped" line the corrected one
+- A timer slot missed during sleep fires at the moment chrony steps the clock (systemd re-checks realtime timers on clock change)
+- `systemctl list-timers` PASSED/LEFT count running time only (monotonic clock, paused time excluded); use `systemctl show <timer> -p LastTriggerUSec` for the real time
+- Background `sudo` can't prompt: run `sudo -v` first (e.g. before `sudo tcpdump … &`)
+- `resolvectl statistics` needs sudo (polkit prompt otherwise)
+- Ping-based MTU tests are unreliable on this network (large ICMP dropped); judge with a real TCP download
+- Before pasting, check the prompt: the WSL client test in 15d was first run on the VM by mistake
 
 ## 4. Stage 1 step plan (weeks 1–5)
 
@@ -185,7 +200,16 @@ For a new chat: read this whole file first. Continue from **Current position**. 
     - 14d. Restore drills: single file, full data/ (technical RTO 0.34 s), corrupted archive detected
     - 14e. Failure drill via /run drop-in; runbook docs/runbooks/backup-restore.md; ADR-0011; checkpoint 07-backup
 15. Networking lab: TCP vs UDP, ports and sockets, TCP handshake in tcpdump; ss, curl -v, dig, ping, traceroute
+    - 15a. Socket inventory (ss -tulpn); refused vs timed out vs loopback-only; UFW BLOCK log line
+    - 15b. TCP in tcpdump: handshake, data, FIN (server closes first), RST for a closed port, unanswered SYN retries
+    - 15c. DNS: stub → Windows proxy → internet on the wire; TTL 0 from the proxy; NXDOMAIN vs NODATA (Cloudflare compact denial) vs timeout
+    - 15d. Routes, ping, tracepath, path MTU 1280, ping ≠ service health
+    - 15e. HTTPS anatomy: curl timings, TLS 1.3, ALPN h2, certificate chain, four badssl.com failures
 16. Nginx reverse proxy + self-signed TLS (SAN = regassist-srv01.mshome.net); ufw allow 443
+    - 16a. Install Nginx; inspect unit, master/worker users, config tree, default site; remove the default site
+    - 16b. Certificates: local CA signing the server certificate (proposed; needs approval) vs plain self-signed
+    - 16c. Reverse proxy 443 → 127.0.0.1:8000, forwarded headers, TLS 1.2/1.3 only, ufw allow 443, test from WSL and the Windows browser
+    - 16d. Hardening and evidence: server_tokens off, security headers, access logs, Nginx sandbox, ADR-0012, checkpoint
 17. End-to-end request trace (Browser → DNS → TCP → TLS → HTTP → Nginx → app), written up in docs/
 18. Failure drills: broken port, DNS failure, TLS error, stopped service
 19. Corpus: source registry (title, publisher, language, URL, retrieval date, version, usage note, SHA-256) + download script; raw files gitignored
@@ -212,7 +236,9 @@ For a new chat: read this whole file first. Continue from **Current position**. 
 
 **Open items**
 
-- Confirm the first scheduled backup (02:30 Riyadh, 27 Oct) and the `Persistent=` catch-up after a laptop sleep or shutdown
+- `Persistent=` catch-up after a full VM shutdown not yet observed (catch-up after a laptop sleep confirmed 2026-10-27: missed 02:30 slot ran at 08:02 UTC when chrony stepped the clock)
+- Step 16b decision: local CA + server certificate (proposed) vs plain self-signed certificate
+- Stage 2: the placeholder's accept backlog is 5 (Python http.server default); the real server (uvicorn) must be sized for load tests
 - Off-VM backup copy plus encryption at rest: a separate unit with network access and read-only access to the archives (restic or borg as candidates); until then backups share the VHDX and are unencrypted
 - Stage 3: application-consistent dumps (Postgres `pg_dump`, Qdrant snapshot API) before archiving
 - Stage 4a: the personal-data retention ADR must cover backups (deleted data survives up to 7 days in archives)
@@ -236,7 +262,7 @@ Weeks run Monday to Sunday from 5 October 2026.
 
 | Stage | Weeks | Hours | Status |
 | --- | --- | --- | --- |
-| 1 — Linux and networking | 1–5 | 36 | In progress (Steps 1–14 done) |
+| 1 — Linux and networking | 1–5 | 36 | In progress (Steps 1–15 done) |
 | 1b — Business analysis + PSPO I (exam ~13 Dec 2026) | 6–11 | 72 | Not started |
 | 1c — Solution architecture + TOGAF EA (exam ~24 Jan 2027) | 12–16 | 60 | Not started |
 | 2 — API, auth, CI v1 | 17–19 | 30 | Not started |
@@ -544,6 +570,51 @@ Outside Project 1 (see the AI Solutions Architect Path doc): case interview prep
 - Probe units use `systemd-run --collect` from now on
 - `docs/runbooks/` holds operational runbooks (Stage 7 failure runbooks go there too)
 
-**Commit** — daee1ea feat(backup): backup script with lock, verification, checksum and retention · 744ae6b feat(deploy): sandboxed backup service and daily timer · 6939949 fix(deploy): drop RestrictSUIDSGID from backup unit; tar needs openat2 · d50416a fix(backup): keep the exit-code contract; report tool failures as 1 with cause · 1bb1649 test(backup): regression test for the exit-code contract · f0ad4c1 docs: backup and restore runbook; ADR-0011 backups · e4f21e0 docs(adr): add ADR-0011 to index · (this file) docs(progress): Step 14 backups
+**Commit** — daee1ea feat(backup): backup script with lock, verification, checksum and retention · 744ae6b feat(deploy): sandboxed backup service and daily timer · 6939949 fix(deploy): drop RestrictSUIDSGID from backup unit; tar needs openat2 · d50416a fix(backup): keep the exit-code contract; report tool failures as 1 with cause · 1bb1649 test(backup): regression test for the exit-code contract · f0ad4c1 docs: backup and restore runbook; ADR-0011 backups · e4f21e0 docs(adr): add ADR-0011 to index · cff7ed6, 0124381, 920d1e1 docs(progress): Step 14 backups and hash fixes
 
 **Next step** — Confirm the 02:30 scheduled backup ran; then Stage 1 → Step 15: networking lab (TCP vs UDP, ports and sockets, TCP handshake in tcpdump; ss, curl -v, dig, ping, traceroute). Pacing: Steps 15–21 remain in weeks 4–5.
+
+### 2026-10-27 — Scheduled backup check + Step 15 (15a–15e)
+
+**Done**
+
+- First timer run confirmed: the 02:30 Riyadh slot was missed during a laptop sleep; the job ran at 08:02:54 UTC, the second chrony stepped the clock forward 36,206 s; backup_done, same SHA-256 (data unchanged); archive name correct
+- 15a: socket inventory with `ss -tulpn` (sshd socket-activated by systemd, app on 127.0.0.1:8000 with backlog 5, resolved stub on 127.0.0.53/54, chronyd, DHCP client); refused (instant, exit 7) vs firewall timeout (5 s, exit 28) vs loopback-only (refused on the LAN address); UFW BLOCK line with WSL as source
+- 15b: tcpdump on lo: SYN → SYN-ACK → ACK, request 84 B, response in two segments, server FIN first (HTTP/1.0 server); plaintext request and JSON visible with -A; closed port → RST; on eth0 the firewalled SYN arrives and is retried with the same sequence number at 1 s intervals (Linux linear SYN backoff, confirmed in WSL sysctl)
+- 15c: DNS on the wire across both hops (separate query IDs; EDNS stripped upstream); Windows proxy rewrites TTL to 0 (1.1.1.1 shows 276 s) → 0 cache hits; made-up name under example.org returned NOERROR/NODATA from both resolvers = Cloudflare compact denial (NSEC proof), not the proxy; `.invalid` gave NXDOMAIN through stub, proxy and 1.1.1.1; unreachable server → timeout after 2 s
+- 15d: routing table read; gateway drops ping but routes (Windows Firewall); tracepath through a 4G/5G router (192.168.8.1) and carrier-grade NAT, path MTU 1280 learned and cached (`ip route get`); large ICMP echo dropped toward both 1.1.1.1 and 8.8.8.8 while a 1.3 MB HTTPS download succeeded; from WSL ping works while port 8000 times out
+- 15e: curl timing breakdown (dns 63 ms, tcp +89 ms, tls +116 ms, first byte +101 ms; ~300 ms of 369 ms is round trips); Happy Eyeballs tried IPv6 first; TLS 1.3, AES-256-GCM, hybrid post-quantum key exchange X25519MLKEM768, ALPN h2; 90-day leaf certificate; four-level chain with a cross-signed root; badssl.com: expired, wrong host, self-signed, untrusted root
+
+**Key concepts**
+
+- Socket = protocol + address + port; connection = 4-tuple; ephemeral client ports; bind address decides who can connect (127.0.0.1 vs 0.0.0.0 vs one IP)
+- Refused (RST: nothing listens) vs timeout (silence: firewall, host down, routing) vs loopback-only; drop vs reject; each has a different owner
+- Listen backlog (accept queue); socket activation (systemd holds the port)
+- TCP: three-way handshake, sequence/ack numbers count bytes, MSS = MTU − 40, FIN from each side, TIME_WAIT on the side that closes first, RST
+- SYN retransmission: same SYN resent; Linux ≥ 6.x keeps the first retries linear (1 s) then backs off; ~2 min default connect timeout → always set client connect timeouts
+- tcpdump sees inbound packets before the firewall drops them; captures need root and contain sensitive data (PDPL)
+- UDP: no handshake, replies matched by query ID; resolver chain stub → recursive → authoritative; TTL and caching; resolv.conf only shows the stub, resolvectl shows upstream
+- DNS outcomes: NXDOMAIN (name owner), NODATA/NOERROR with 0 answers (incl. compact denial in signed zones), SERVFAIL (resolver), timeout (network); compare resolvers before blaming one; DNS as an exfiltration channel
+- Routing table: connected vs default route, most specific wins; TTL as hop counter and how tracing works; "no reply" hops are not breaks; NAT layers
+- MTU/MSS, path MTU discovery depends on ICMP "frag needed"; blocking all ICMP creates black holes; per-destination PMTU cache; ping ≠ service health
+- HTTPS timeline (DNS → TCP → TLS → first byte); TLS gives confidentiality, integrity, server authentication; chain to a trusted root, name in SAN, validity dates; SNI and ALPN; cross-signing; short-lived certificates need automated renewal; never `curl -k`
+- Monotonic vs realtime clocks in timer displays; missed timers fire on clock steps
+
+**Validation**
+
+- Scheduled backup: LastTriggerUSec 08:02:54 UTC; chrony "stepped by 36206.107013 seconds" at 08:02:54; archive regassist-20261027T080255Z.tar.gz, 352 bytes, sha256 3d80…
+- 15a: 7 ms refused (exit 7); 5,003 ms timeout (exit 28); loopback-only refused on 172.27.50.46:8000; `[UFW BLOCK] … SRC=172.21.48.20 … DPT=8000 … SYN`, two SYNs, TTL 63
+- 15b: 12-packet exchange [S] [S.] [.] [P.] [.] [P.] [.] [P.] [.] [F.] [F.] [.]; `GET /health HTTP/1.1` / `HTTP/1.0 200 OK` in clear text; 8001 → [R.] win 0; six SYNs ~1.02 s apart with no reply; WSL sysctl 4 / 6
+- 15c: four-packet capture lo → eth0 → eth0 → lo; TTL 0 via 172.27.48.1 vs 276 via 1.1.1.1; cache hits 0 / misses 107; NSEC `\000.nonexistent-regassist-test.example.org. RRSIG NSEC …`; `.invalid` NXDOMAIN ×3; 192.0.2.1 timeout 2.0 s
+- 15d: 100% loss to 172.27.48.1 but hop 1 in tracepath; `pmtu 1280` at hop 3; `cache expires 342sec mtu 1280`; 1172–1252-byte pings 0 received on both targets; HTTPS 200, 1,334,522 bytes in 0.89 s; WSL ping 0.9 ms, curl exit 28
+- 15e: `http/2 200`, total 0.369 s; `TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768`; issuer Cloudflare TLS Issuing ECC CA 3; valid Sep 26 – Dec 25 2026; `Verify return code: 0 (ok)`; badssl errors 10 (expired), name mismatch, 18 (self-signed), 19 (self-signed in chain)
+
+**Decisions**
+
+- No configuration changes in Step 15 (lab only); findings recorded in section 3 and known quirks
+- Ping-based MTU checks are not trusted on this network; TCP evidence decides
+- Step 16 plan split into 16a–16d; the certificate approach (local CA vs self-signed) is decided at the start of 16b
+
+**Commit** — none for the lab · (this file) docs(progress): Step 15 networking lab
+
+**Next step** — Stage 1 → Step 16a: install Nginx and inspect it (unit, master/worker users, config tree, default site), then remove the default site. Pacing: Steps 16–21 remain in weeks 4–5.
