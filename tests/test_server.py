@@ -2,10 +2,12 @@
 
 import json
 import logging
+import socket
 import threading
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -84,3 +86,42 @@ def test_json_formatter_syslog_prefix_maps_level() -> None:
 @pytest.mark.parametrize(("env", "expected"), [({"JOURNAL_STREAM": "8:1234"}, True), ({}, False)])
 def test_journal_stream_detection(env: dict[str, str], expected: bool) -> None:
     assert journal_stream_attached(env) is expected
+
+
+QUERY_WITH_PERSONAL_DATA = "national_id=1234567890"
+
+
+def test_health_ignores_query_string(base_url: str) -> None:
+    url = f"{base_url}/health?{QUERY_WITH_PERSONAL_DATA}"
+    with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310
+        assert resp.status == 200
+        assert json.loads(resp.read())["status"] == "ok"
+
+
+def test_request_log_omits_query_string(base_url: str, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="regassist.server")
+    url = f"{base_url}/health?{QUERY_WITH_PERSONAL_DATA}"
+    with urllib.request.urlopen(url, timeout=5):  # noqa: S310
+        pass
+    requests = [r for r in caplog.records if r.getMessage() == "request"]
+    assert requests, "no request log record captured"
+    line = JsonFormatter().format(requests[-1])
+    assert json.loads(line)["path"] == "/health"
+    assert "1234567890" not in line
+
+
+def test_malformed_request_line_gets_400_and_is_logged(
+    base_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Too many words: the base class rejects it before it sets self.path.
+    caplog.set_level(logging.INFO, logger="regassist.server")
+    parts = urlsplit(base_url)
+    assert parts.hostname is not None
+    assert parts.port is not None
+    with socket.create_connection((parts.hostname, parts.port), timeout=5) as sock:
+        sock.sendall(b"GET /a /b HTTP/1.0\r\n\r\n")
+        response = sock.recv(1024)
+    assert response.startswith(b"HTTP/1.0 400")
+    requests = [r for r in caplog.records if r.getMessage() == "request"]
+    assert requests, "no request log record captured"
+    assert json.loads(JsonFormatter().format(requests[-1]))["path"] == ""

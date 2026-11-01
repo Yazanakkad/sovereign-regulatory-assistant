@@ -85,10 +85,19 @@ class JsonFormatter(logging.Formatter):
 
 
 class HealthHandler(BaseHTTPRequestHandler):
-    """Serves GET /health; everything else is a JSON 404."""
+    """Serves GET /health; everything else is a JSON 404.
+
+    Routing and the request log use the path only, never the query string:
+    query strings can carry personal data (PDPL).
+    """
+
+    def _request_path(self) -> str:
+        # self.path is the raw request target ("/health?x=1"). The base class logs
+        # malformed request lines before it sets self.path, hence the default.
+        return getattr(self, "path", "").partition("?")[0]
 
     def do_GET(self) -> None:
-        if self.path == "/health":
+        if self._request_path() == "/health":
             self._send_json(HTTPStatus.OK, {"status": "ok", "version": __version__})
         else:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -103,7 +112,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             extra={
                 "fields": {
                     "method": self.command,
-                    "path": self.path,
+                    "path": self._request_path(),
                     "status": int(code) if isinstance(code, int) else code,
                     "client": self.client_address[0],
                 }
